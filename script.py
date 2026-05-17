@@ -29,6 +29,19 @@ TOKEN_FILE = ".token.json"
 CHECK_EVERY_MIN = 2
 BUFFER_MINUTES = 60
 REQUEST_TIMEOUT = 30
+MAX_RETRIES = 5
+
+
+def request_with_retry(method, url, **kw):
+    kw.setdefault("timeout", REQUEST_TIMEOUT)
+    for attempt in range(MAX_RETRIES):
+        r = requests.request(method, url, **kw)
+        if r.status_code != 429:
+            return r
+        wait = float(r.headers.get("Retry-After", 1))
+        log.warning("429 rate-limited, sleeping %.1fs (attempt %d)", wait, attempt + 1)
+        time.sleep(wait)
+    return r
 
 
 def iso(dt):
@@ -70,7 +83,8 @@ def login_in_browser():
         raise RuntimeError("OAuth state mismatch")
     if not received.get("code"):
         raise RuntimeError("OAuth callback missing code")
-    r = requests.post(
+    r = request_with_retry(
+        "POST",
         f"{BASE}/oauth/token",
         data={
             "grant_type": "authorization_code",
@@ -79,14 +93,14 @@ def login_in_browser():
             "code": received["code"],
             "redirect_uri": REDIRECT,
         },
-        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
 
 
 def refresh(tok):
-    r = requests.post(
+    r = request_with_retry(
+        "POST",
         f"{BASE}/oauth/token",
         data={
             "grant_type": "refresh_token",
@@ -94,7 +108,6 @@ def refresh(tok):
             "client_id": cfg["UID"],
             "client_secret": cfg["SECRET"],
         },
-        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
@@ -133,14 +146,14 @@ def _run_cycle(headers):
     window_end = now + timedelta(hours=24)
     cutoff = now + timedelta(minutes=BUFFER_MINUTES)
 
-    r = requests.get(
+    r = request_with_retry(
+        "GET",
         f"{BASE}/v2/me/slots",
         headers=headers,
         params={
             "range[begin_at]": f"{iso(now)},{iso(window_end)}",
             "page[size]": 100,
         },
-        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     slots = sorted(r.json(), key=lambda x: x["begin_at"])
@@ -156,7 +169,7 @@ def _run_cycle(headers):
         print(f"  {s['id']:>8}  {begin.astimezone():%H:%M} → {end.astimezone():%H:%M}  [{tag}]")
 
     for s in to_delete:
-        r = requests.delete(f"{BASE}/v2/slots/{s['id']}", headers=headers, timeout=REQUEST_TIMEOUT)
+        r = request_with_retry("DELETE", f"{BASE}/v2/slots/{s['id']}", headers=headers)
         print(f"    deleted {s['id']} → {r.status_code}")
 
 
@@ -181,10 +194,10 @@ def cycle():
 def main():
     token = get_token()
 
-    me = requests.get(
+    me = request_with_retry(
+        "GET",
         f"{BASE}/v2/me",
         headers={"Authorization": f"Bearer {token}"},
-        timeout=REQUEST_TIMEOUT,
     ).json()
     log.info("Logged in as %s (id %s)", me["login"], me["id"])
 
