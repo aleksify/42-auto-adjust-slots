@@ -141,7 +141,10 @@ def get_token():
     return tok["access_token"]
 
 
-def _run_cycle(headers):
+def cycle():
+    token = get_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
     now = datetime.now(timezone.utc)
     window_end = now + timedelta(hours=24)
     cutoff = now + timedelta(minutes=BUFFER_MINUTES)
@@ -171,24 +174,6 @@ def _run_cycle(headers):
     for s in to_delete:
         r = request_with_retry("DELETE", f"{BASE}/v2/slots/{s['id']}", headers=headers)
         print(f"    deleted {s['id']} → {r.status_code}")
-
-
-def cycle():
-    for attempt in (1, 2):
-        token = get_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        try:
-            _run_cycle(headers)
-            return
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code == 401 and attempt == 1:
-                log.warning("401 from API, invalidating cached token and retrying")
-                try:
-                    os.remove(TOKEN_FILE)
-                except FileNotFoundError:
-                    pass
-                continue
-            raise
 
 
 def main():
