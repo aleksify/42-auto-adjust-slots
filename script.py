@@ -5,8 +5,14 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+BASE = "https://api.intra.42.fr"
+REDIRECT = "http://localhost:8080/callback"
+SCOPE = "public projects"
+TOKEN_FILE = ".token.json"
+CHECK_EVERY_MIN = 2
+BUFFER_MINUTES = 60
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 5
 
 
 def load_env(path=".env"):
@@ -22,14 +28,8 @@ def load_env(path=".env"):
 
 
 cfg = load_env()
-BASE = "https://api.intra.42.fr"
-REDIRECT = "http://localhost:8080/callback"
-SCOPE = "public projects"
-TOKEN_FILE = ".token.json"
-CHECK_EVERY_MIN = 2
-BUFFER_MINUTES = 60
-REQUEST_TIMEOUT = 30
-MAX_RETRIES = 5
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 
 def request_with_retry(method, url, **kw):
@@ -165,11 +165,13 @@ def cycle():
     to_delete = []
     for s in slots:
         begin = datetime.fromisoformat(s["begin_at"])
-        end   = datetime.fromisoformat(s["end_at"])
+        end = datetime.fromisoformat(s["end_at"])
         tag = "DELETE" if begin < cutoff else "keep"
         if tag == "DELETE":
             to_delete.append(s)
-        print(f"  {s['id']:>8}  {begin.astimezone():%H:%M} → {end.astimezone():%H:%M}  [{tag}]")
+        print(
+            f"  {s['id']:>8}  {begin.astimezone():%H:%M} → {end.astimezone():%H:%M}  [{tag}]"
+        )
 
     for s in to_delete:
         r = request_with_retry("DELETE", f"{BASE}/v2/slots/{s['id']}", headers=headers)
@@ -186,7 +188,9 @@ def main():
     ).json()
     log.info("Logged in as %s (id %s)", me["login"], me["id"])
 
-    log.info("Watching slots, checking every %d minute(s). Ctrl+C to stop.", CHECK_EVERY_MIN)
+    log.info(
+        "Watching slots, checking every %d minute(s). Ctrl+C to stop.", CHECK_EVERY_MIN
+    )
     try:
         while True:
             try:
