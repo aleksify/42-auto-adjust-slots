@@ -1,4 +1,4 @@
-# 42-auto-adjust-slots
+# 42-intra-buffer-slots
 
 Open evaluation slots from home without worrying about a slot getting booked before you can make it to campus.
 
