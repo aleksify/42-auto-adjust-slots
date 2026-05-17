@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
-import json, os, secrets, webbrowser, requests, time
+import json, logging, os, secrets, webbrowser, requests, time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 
 def load_env(path=".env"):
@@ -25,6 +28,7 @@ SCOPE = "public projects"
 TOKEN_FILE = ".token.json"
 CHECK_EVERY_MIN = 2
 BUFFER_MINUTES = 60
+REQUEST_TIMEOUT = 30
 
 
 def iso(dt):
@@ -58,11 +62,14 @@ def login_in_browser():
             pass
 
     server = HTTPServer(("localhost", 8080), Handler)
-    print("Opening browser for login...")
+    log.info("Opening browser for login...")
     webbrowser.open(auth_url)
     server.handle_request()
 
-    assert received["state"] == state, "state mismatch"
+    if received.get("state") != state:
+        raise RuntimeError("OAuth state mismatch")
+    if not received.get("code"):
+        raise RuntimeError("OAuth callback missing code")
     r = requests.post(
         f"{BASE}/oauth/token",
         data={
@@ -72,6 +79,7 @@ def login_in_browser():
             "code": received["code"],
             "redirect_uri": REDIRECT,
         },
+        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
@@ -86,6 +94,7 @@ def refresh(tok):
             "client_id": cfg["UID"],
             "client_secret": cfg["SECRET"],
         },
+        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
@@ -96,31 +105,30 @@ def get_token():
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE) as f:
             tok = json.load(f)
-    print()
     if tok and tok["created_at"] + tok["expires_in"] - 60 > datetime.now().timestamp():
-        print("Using access token from .token.json")
+        log.info("Using access token from .token.json")
         return tok["access_token"]
 
     if tok and "refresh_token" in tok:
         try:
             tok = refresh(tok)
-            print("Using refresh token from .token.json to get new access token")
+            log.info("Using refresh token from .token.json to get new access token")
         except requests.HTTPError:
             tok = None
 
     if not tok:
-        print("No valid access or refresh token in .token.json, need to login")
+        log.info("No valid access or refresh token in .token.json, need to login")
         tok = login_in_browser()
 
-    with open(TOKEN_FILE, "w") as f:
+    tmp = TOKEN_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(tok, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TOKEN_FILE)
     return tok["access_token"]
 
 
-def cycle():
-    token = get_token()
-    headers = {"Authorization": f"Bearer {token}"}
-
+def _run_cycle(headers):
     now = datetime.now(timezone.utc)
     window_end = now + timedelta(hours=24)
     cutoff = now + timedelta(minutes=BUFFER_MINUTES)
@@ -132,6 +140,7 @@ def cycle():
             "range[begin_at]": f"{iso(now)},{iso(window_end)}",
             "page[size]": 100,
         },
+        timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
     slots = sorted(r.json(), key=lambda x: x["begin_at"])
@@ -139,35 +148,57 @@ def cycle():
     print(f"\n[{now.astimezone():%H:%M:%S %Z}] {len(slots)} slot(s) in next 24h:")
     to_delete = []
     for s in slots:
-        begin = datetime.fromisoformat(s["begin_at"].replace("Z", "+00:00"))
-        end   = datetime.fromisoformat(s["end_at"].replace("Z", "+00:00"))
+        begin = datetime.fromisoformat(s["begin_at"])
+        end   = datetime.fromisoformat(s["end_at"])
         tag = "DELETE" if begin < cutoff else "keep"
         if tag == "DELETE":
             to_delete.append(s)
         print(f"  {s['id']:>8}  {begin.astimezone():%H:%M} → {end.astimezone():%H:%M}  [{tag}]")
 
     for s in to_delete:
-        r = requests.delete(f"{BASE}/v2/slots/{s['id']}", headers=headers)
+        r = requests.delete(f"{BASE}/v2/slots/{s['id']}", headers=headers, timeout=REQUEST_TIMEOUT)
         print(f"    deleted {s['id']} → {r.status_code}")
 
 
-token = get_token()
-
-info = requests.get(
-    f"{BASE}/oauth/token/info", headers={"Authorization": f"Bearer {token}"}
-).json()
-print(info)
-
-me = requests.get(f"{BASE}/v2/me", headers={"Authorization": f"Bearer {token}"}).json()
-print(f"Logged in as {me['login']} (id {me['id']})")
-
-print(f"Watching slots, checking every {CHECK_EVERY_MIN} minute(s). Ctrl+C to stop.")
-try:
-    while True:
+def cycle():
+    for attempt in (1, 2):
+        token = get_token()
+        headers = {"Authorization": f"Bearer {token}"}
         try:
-            cycle()
-        except Exception as e:
-            print(f"  ! cycle error: {e}")
-        time.sleep(CHECK_EVERY_MIN * 60)
-except KeyboardInterrupt:
-    print("\nStopped.")
+            _run_cycle(headers)
+            return
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401 and attempt == 1:
+                log.warning("401 from API, invalidating cached token and retrying")
+                try:
+                    os.remove(TOKEN_FILE)
+                except FileNotFoundError:
+                    pass
+                continue
+            raise
+
+
+def main():
+    token = get_token()
+
+    me = requests.get(
+        f"{BASE}/v2/me",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=REQUEST_TIMEOUT,
+    ).json()
+    log.info("Logged in as %s (id %s)", me["login"], me["id"])
+
+    log.info("Watching slots, checking every %d minute(s). Ctrl+C to stop.", CHECK_EVERY_MIN)
+    try:
+        while True:
+            try:
+                cycle()
+            except Exception:
+                log.exception("cycle error")
+            time.sleep(CHECK_EVERY_MIN * 60)
+    except KeyboardInterrupt:
+        log.info("stopped")
+
+
+if __name__ == "__main__":
+    main()
