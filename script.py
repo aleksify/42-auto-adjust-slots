@@ -71,13 +71,41 @@ def login_in_browser():
     return r.json()
 
 
+def refresh(tok):
+    r = requests.post(
+        f"{BASE}/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": tok["refresh_token"],
+            "client_id": cfg["UID"],
+            "client_secret": cfg["SECRET"],
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+
 def get_token():
+    tok = None
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE) as f:
             tok = json.load(f)
-        if tok["created_at"] + tok["expires_in"] - 60 > datetime.now().timestamp():
-            return tok["access_token"]
-    tok = login_in_browser()
+
+    if tok and tok["created_at"] + tok["expires_in"] - 60 > datetime.now().timestamp():
+        print("Using access token from .token.json")
+        return tok["access_token"]
+
+    if tok and "refresh_token" in tok:
+        try:
+            tok = refresh(tok)
+            print("Using refresh token from .token.json to get new access token")
+        except requests.HTTPError:
+            tok = None
+
+    if not tok:
+        print("No valid access or refresh token in .token.json, need to login")
+        tok = login_in_browser()
+
     with open(TOKEN_FILE, "w") as f:
         json.dump(tok, f)
     return tok["access_token"]
