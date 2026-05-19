@@ -10,7 +10,7 @@ REDIRECT = "http://localhost:8080/callback"
 SCOPE = "public projects"
 TOKEN_FILE = ".token.json"
 CHECK_EVERY_MIN = 2
-BUFFER_MINUTES = 60
+BUFFER_MINUTES = 75
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 5
 
@@ -166,16 +166,26 @@ def cycle():
     for s in slots:
         begin = datetime.fromisoformat(s["begin_at"])
         end = datetime.fromisoformat(s["end_at"])
-        tag = "DELETE" if begin < cutoff else "keep"
+        booked = s.get("scale_team") is not None
+        
+        if booked:
+            tag = "booked"
+        elif begin < cutoff:
+            tag = "DELETE"
+            to_delete.append(s)
+        else:
+            tag = "keep"
+
         if tag == "DELETE":
             to_delete.append(s)
         print(
             f"  {s['id']:>8}  {begin.astimezone():%H:%M} → {end.astimezone():%H:%M}  [{tag}]"
         )
-
+    print()
     for s in to_delete:
         r = request_with_retry("DELETE", f"{BASE}/v2/slots/{s['id']}", headers=headers)
         print(f"    deleted {s['id']} → {r.status_code}")
+    print()
 
 
 def main():
